@@ -30,14 +30,6 @@ Experience Sanskriti Setu live:
 
 ---
 
-## Video Demonstration
-
-**[Link to Your Video Demo - e.g., YouTube, Vimeo, Loom]**
-
-*The video walks through the application's features, highlights the user journey, and specifically demonstrates the Snowflake integration by explaining the data pipeline, showing key table structures in Snowsight, an example of the `UNPIVOT` transformation for seasonality data, and illustrating how data from Snowflake populates the app's interactive visualizations.*
-
----
-
 ## Tech Stack
 
 * **Frontend & Application Logic:** Streamlit (Python)
@@ -99,9 +91,9 @@ Snowflake serves as the central data warehouse for संस्कृति स�
         [snowflake]
         user = "YOUR_SNOWFLAKE_USERNAME"
         password = "YOUR_SNOWFLAKE_PASSWORD"
-        account = "YOUR_SNOWFLAKE_ACCOUNT_IDENTIFIER" # e.g., xy12345.region.cloud
+        account = "YOUR_SNOWFLAKE_ACCOUNT_IDENTIFIER"
         warehouse = "HACKATHON_WH" 
-        database = "INDIA_CULTURE_TOURISM_DB" 
+        database = "YOUR_DB" 
         schema = "TOURISM_DATA" 
         # role = "YOUR_SNOWFLAKE_ROLE" # Optional: specify a role
         ```
