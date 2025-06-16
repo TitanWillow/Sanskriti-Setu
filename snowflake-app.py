@@ -1,29 +1,27 @@
-# --- START OF FILE app.py ---
-
 import streamlit as st
-import psycopg2 # Changed from snowflake.connector
+import snowflake.connector
 import pandas as pd
 import numpy as np
 
 @st.cache_resource
 def init_connection():
-    # Connect to PostgreSQL instead of Snowflake
-    return psycopg2.connect(**st.secrets["postgres_neon"])
+    return snowflake.connector.connect(
+        **st.secrets["snowflake"],
+        client_session_keep_alive=True 
+    )
+
 
 @st.cache_data(ttl=600)
-def run_query(_conn, query, params=None):
+def run_query(_conn, query):
     with _conn.cursor() as cur:
-        cur.execute(query, params)
+        cur.execute(query)
         return cur.fetchall()
 
 @st.cache_data(ttl=600)
-def run_query_df(_conn, query, params=None):
-    # psycopg2 doesn't have fetch_pandas_all(), so we build the DataFrame manually
+def run_query_df(_conn, query):
     with _conn.cursor() as cur:
-        cur.execute(query, params)
-        rows = cur.fetchall()
-        colnames = [desc[0] for desc in cur.description]
-        df = pd.DataFrame(rows, columns=colnames)
+        cur.execute(query)
+        df = cur.fetch_pandas_all()
     return df
 
 def calculate_growth(current, previous):
@@ -44,17 +42,6 @@ def calculate_growth(current, previous):
             
     growth = ((current - previous) / previous) * 100
     return f"{growth:.2f}%"
-
-# Consolidated growth to numeric function
-def growth_to_numeric(growth_str):
-    if isinstance(growth_str, str):
-        if growth_str == "New Growth": return 10000 
-        if growth_str == "N/A" or growth_str == "0.00%": return 0
-        try: 
-            return float(growth_str.replace('%',''))
-        except ValueError:
-            return 0 
-    return float(growth_str) if pd.notna(growth_str) else 0
 
 
 st.set_page_config(layout="wide", page_title="Sanskriti Setu", page_icon="🕌")
@@ -93,25 +80,16 @@ if st.session_state.app_mode == "🏠 Home & Tourism Overview":
     st.header("India Tourism Snapshot")
 
     try:
-        # Updated query for PostgreSQL schema and to avoid SQL injection
-        query_all_state_data = """
-            SELECT state_ut, domestic_visitors_yr1, foreign_visitors_yr1, 
-                   domestic_visitors_yr2, foreign_visitors_yr2, 
-                   data_period_yr1, data_period_yr2 
-            FROM tourism_data.state_tourism_visits 
-            WHERE state_ut NOT LIKE 'Total%%' 
-              AND state_ut NOT LIKE 'GRAND TOTAL' 
-              AND state_ut IS NOT NULL;
-        """
+        query_all_state_data = "SELECT State_UT, Domestic_Visitors_Yr1, Foreign_Visitors_Yr1, Domestic_Visitors_Yr2, Foreign_Visitors_Yr2, Data_Period_Yr1, Data_Period_Yr2 FROM State_Tourism_Visits WHERE State_UT NOT LIKE 'Total%' AND State_UT NOT LIKE 'GRAND TOTAL' AND State_UT IS NOT NULL;"
         df_all_state_data = run_query_df(conn, query_all_state_data)
 
         if not df_all_state_data.empty:
-            visitor_cols_yr1 = ['domestic_visitors_yr1', 'foreign_visitors_yr1']
-            visitor_cols_yr2 = ['domestic_visitors_yr2', 'foreign_visitors_yr2']
+            visitor_cols_yr1 = ['DOMESTIC_VISITORS_YR1', 'FOREIGN_VISITORS_YR1']
+            visitor_cols_yr2 = ['DOMESTIC_VISITORS_YR2', 'FOREIGN_VISITORS_YR2']
             for col in visitor_cols_yr1 + visitor_cols_yr2:
                 df_all_state_data[col] = pd.to_numeric(df_all_state_data[col], errors='coerce').fillna(0)
 
-            available_years = sorted(df_all_state_data['data_period_yr2'].astype(str).unique(), reverse=True)
+            available_years = sorted(df_all_state_data['DATA_PERIOD_YR2'].astype(str).unique(), reverse=True)
             
             if not available_years:
                 st.warning("No years available for selection in State Tourism Data.")
@@ -123,14 +101,14 @@ if st.session_state.app_mode == "🏠 Home & Tourism Overview":
                     visitor_type_home = st.selectbox("View by:", ["Domestic Visitors", "Foreign Visitors"], key="home_visitor_type")
 
                 st.subheader(f"Top 10 States by {visitor_type_home} ({selected_year_home})")
-                df_selected_year_home = df_all_state_data[df_all_state_data['data_period_yr2'] == selected_year_home].copy()
+                df_selected_year_home = df_all_state_data[df_all_state_data['DATA_PERIOD_YR2'] == selected_year_home].copy()
 
                 if not df_selected_year_home.empty:
-                    sort_column_home = 'domestic_visitors_yr2' if visitor_type_home == "Domestic Visitors" else 'foreign_visitors_yr2'
+                    sort_column_home = 'DOMESTIC_VISITORS_YR2' if visitor_type_home == "Domestic Visitors" else 'FOREIGN_VISITORS_YR2'
                     display_column_name_home = f"{visitor_type_home} ({selected_year_home})"
                     
                     df_top10_home = df_selected_year_home.sort_values(by=sort_column_home, ascending=False).head(10)
-                    df_display_top10_home = df_top10_home[['state_ut', sort_column_home]].copy()
+                    df_display_top10_home = df_top10_home[['STATE_UT', sort_column_home]].copy()
                     df_display_top10_home.columns = ["State/UT", display_column_name_home]
                     df_display_top10_home.index = np.arange(1, len(df_display_top10_home) + 1) 
                     st.dataframe(df_display_top10_home)
@@ -144,34 +122,43 @@ if st.session_state.app_mode == "🏠 Home & Tourism Overview":
 
             latest_report_year_for_growth = available_years[0] if available_years else None
             if latest_report_year_for_growth:
-                df_latest_growth_period = df_all_state_data[df_all_state_data['data_period_yr2'] == latest_report_year_for_growth].copy()
-                if not df_latest_growth_period.empty and 'data_period_yr1' in df_latest_growth_period.columns:
-                    df_latest_growth_period['total_visitors_yr1'] = df_latest_growth_period['domestic_visitors_yr1'] + df_latest_growth_period['foreign_visitors_yr1']
-                    df_latest_growth_period['total_visitors_yr2'] = df_latest_growth_period['domestic_visitors_yr2'] + df_latest_growth_period['foreign_visitors_yr2']
+                df_latest_growth_period = df_all_state_data[df_all_state_data['DATA_PERIOD_YR2'] == latest_report_year_for_growth].copy()
+                if not df_latest_growth_period.empty and 'DATA_PERIOD_YR1' in df_latest_growth_period.columns:
+                    df_latest_growth_period['TOTAL_VISITORS_YR1'] = df_latest_growth_period['DOMESTIC_VISITORS_YR1'] + df_latest_growth_period['FOREIGN_VISITORS_YR1']
+                    df_latest_growth_period['TOTAL_VISITORS_YR2'] = df_latest_growth_period['DOMESTIC_VISITORS_YR2'] + df_latest_growth_period['FOREIGN_VISITORS_YR2']
                     
-                    df_latest_growth_period['total_growth_pct_calculated'] = df_latest_growth_period.apply(
-                        lambda row: calculate_growth(row['total_visitors_yr2'], row['total_visitors_yr1']), axis=1
+                    df_latest_growth_period['TOTAL_GROWTH_PCT_CALCULATED'] = df_latest_growth_period.apply(
+                        lambda row: calculate_growth(row['TOTAL_VISITORS_YR2'], row['TOTAL_VISITORS_YR1']), axis=1
                     )
-                    
-                    df_latest_growth_period['total_growth_numeric'] = df_latest_growth_period['total_growth_pct_calculated'].apply(growth_to_numeric)
+                    def growth_to_numeric(growth_str):
+                        if isinstance(growth_str, str):
+                            if growth_str == "New Growth": return 10000 
+                            if growth_str == "N/A" or growth_str == "0.00%": return 0
+                            try: 
+                                return float(growth_str.replace('%',''))
+                            except ValueError:
+                                return 0 
+                        return float(growth_str) if pd.notna(growth_str) else 0
 
-                    top10_latest_year_states_total_visits = df_latest_growth_period.sort_values(by='total_visitors_yr2', ascending=False).head(10)['state_ut'].tolist()
+                    df_latest_growth_period['TOTAL_GROWTH_NUMERIC'] = df_latest_growth_period['TOTAL_GROWTH_PCT_CALCULATED'].apply(growth_to_numeric)
+
+                    top10_latest_year_states_total_visits = df_latest_growth_period.sort_values(by='TOTAL_VISITORS_YR2', ascending=False).head(10)['STATE_UT'].tolist()
                     df_rising_stars = df_latest_growth_period[
-                        ~df_latest_growth_period['state_ut'].isin(top10_latest_year_states_total_visits) &
-                        (df_latest_growth_period['total_growth_numeric'] > 10) 
-                    ].sort_values(by='total_growth_numeric', ascending=False).head(5)
+                        ~df_latest_growth_period['STATE_UT'].isin(top10_latest_year_states_total_visits) &
+                        (df_latest_growth_period['TOTAL_GROWTH_NUMERIC'] > 10) 
+                    ].sort_values(by='TOTAL_GROWTH_NUMERIC', ascending=False).head(5)
 
                     if not df_rising_stars.empty:
-                        data_period_yr1_rising = df_rising_stars['data_period_yr1'].iloc[0]
-                        data_period_yr2_rising = df_rising_stars['data_period_yr2'].iloc[0]
+                        data_period_yr1_rising = df_rising_stars['DATA_PERIOD_YR1'].iloc[0]
+                        data_period_yr2_rising = df_rising_stars['DATA_PERIOD_YR2'].iloc[0]
                         st.write(f"Emerging destinations based on total visitor growth from {data_period_yr1_rising} to {data_period_yr2_rising} (Min. 10% growth, outside Top 10):")
                         for index, row_star in df_rising_stars.iterrows():
-                            delta_val = row_star['total_growth_pct_calculated']
+                            delta_val = row_star['TOTAL_GROWTH_PCT_CALCULATED']
                             delta_display = delta_val if delta_val not in ["N/A", "0.00%"] else None 
-                            st.metric(label=row_star["state_ut"], 
-                                      value=f"{int(row_star['total_visitors_yr2']):,} visits", 
+                            st.metric(label=row_star["STATE_UT"], 
+                                      value=f"{int(row_star['TOTAL_VISITORS_YR2']):,} visits", 
                                       delta=delta_display)
-                        df_rising_display = df_rising_stars[['state_ut', 'total_visitors_yr1', 'total_visitors_yr2', 'total_growth_pct_calculated']].copy()
+                        df_rising_display = df_rising_stars[['STATE_UT', 'TOTAL_VISITORS_YR1', 'TOTAL_VISITORS_YR2', 'TOTAL_GROWTH_PCT_CALCULATED']].copy()
                         df_rising_display.columns = ["State/UT", f"Total Visits ({data_period_yr1_rising})", f"Total Visits ({data_period_yr2_rising})", "Overall Growth"]
                         df_rising_display.index = np.arange(1, len(df_rising_display) + 1)
                         st.dataframe(df_rising_display)
@@ -190,35 +177,33 @@ elif st.session_state.app_mode == "🎨 Traditional Art Forms":
     st.title("🎨 Discover India's Traditional Art Forms")
     st.markdown("India's artistic heritage is a vibrant mosaic of myriad art forms, each telling a unique story of its region, culture, and people.")
     try:
-        query = "SELECT artformname, stateoforigin, category, briefdescription, imageurl, responsibleconsumptiontip FROM tourism_data.traditionalartforms;"
-        df_arts = run_query_df(conn, query)
-        
+        df_arts = run_query_df(conn, "SELECT ArtFormName, StateOfOrigin, Category, BriefDescription, ImageURL, ResponsibleConsumptionTip FROM TraditionalArtForms;")
         if not df_arts.empty:
-            states = sorted([s for s in df_arts['stateoforigin'].unique() if pd.notna(s)])
-            categories = sorted([c for c in df_arts['category'].unique() if pd.notna(c)])
+            states = sorted([s for s in df_arts['STATEOFORIGIN'].unique() if pd.notna(s)])
+            categories = sorted([c for c in df_arts['CATEGORY'].unique() if pd.notna(c)])
 
             selected_state_art = st.selectbox("Filter by State:", ["All"] + states, key="art_state")
             selected_category_art = st.selectbox("Filter by Category:", ["All"] + categories, key="art_cat")
 
             filtered_arts = df_arts.copy()
             if selected_state_art != "All":
-                filtered_arts = filtered_arts[filtered_arts['stateoforigin'] == selected_state_art]
+                filtered_arts = filtered_arts[filtered_arts['STATEOFORIGIN'] == selected_state_art]
             if selected_category_art != "All":
-                filtered_arts = filtered_arts[filtered_arts['category'] == selected_category_art]
+                filtered_arts = filtered_arts[filtered_arts['CATEGORY'] == selected_category_art]
 
             if not filtered_arts.empty:
                 for index, row in filtered_arts.iterrows():
-                    st.subheader(row['artformname'])
-                    if pd.notna(row['imageurl']) and row['imageurl'].strip(): 
+                    st.subheader(row['ARTFORMNAME'])
+                    if pd.notna(row['IMAGEURL']) and row['IMAGEURL'].strip(): 
                         try:
-                            st.image(row['imageurl'], width=300, caption=f"{row['artformname']} from {row['stateoforigin']}")
+                            st.image(row['IMAGEURL'], width=300, caption=f"{row['ARTFORMNAME']} from {row['STATEOFORIGIN']}")
                         except Exception as img_e:
-                            st.caption(f"Image not available for {row['artformname']}")
-                    st.markdown(f"**State of Origin:** {row['stateoforigin']}")
-                    st.markdown(f"**Category:** {row['category']}")
-                    st.write(row['briefdescription'])
-                    if pd.notna(row['responsibleconsumptiontip']):
-                         st.info(f"💡 Responsible Tip: {row['responsibleconsumptiontip']}")
+                            st.caption(f"Image not available for {row['ARTFORMNAME']}")
+                    st.markdown(f"**State of Origin:** {row['STATEOFORIGIN']}")
+                    st.markdown(f"**Category:** {row['CATEGORY']}")
+                    st.write(row['BRIEFDESCRIPTION'])
+                    if pd.notna(row['RESPONSIBLECONSUMPTIONTIP']):
+                         st.info(f"💡 Responsible Tip: {row['RESPONSIBLECONSUMPTIONTIP']}")
                     st.markdown("---")
             else:
                 st.write("No art forms match your current filter.")
@@ -238,41 +223,43 @@ elif st.session_state.app_mode == "🏛️ Explore Cultural Destinations":
         st.subheader("Monuments with Rising Visitor Interest")
         st.markdown("Identifying monuments (not in the absolute Top 10 of the latest year) showing significant growth in total visitors.")
         try:
-            latest_fy_range_df = run_query_df(conn, "SELECT MAX(financial_year_range) AS latest_fy FROM tourism_data.all_monuments_stats;")
-            if not latest_fy_range_df.empty and pd.notna(latest_fy_range_df['latest_fy'].iloc[0]):
-                latest_fy = latest_fy_range_df['latest_fy'].iloc[0]
+            latest_fy_range_df = run_query_df(conn, "SELECT MAX(Financial_Year_Range) AS LATEST_FY FROM All_Monuments_Stats;")
+            if not latest_fy_range_df.empty and pd.notna(latest_fy_range_df['LATEST_FY'].iloc[0]):
+                latest_fy = latest_fy_range_df['LATEST_FY'].iloc[0]
                 
-                query_top10_latest_all_types = "SELECT DISTINCT monument_name FROM tourism_data.top_monuments WHERE financial_year = %s AND monument_name != 'Others';"
-                df_top10_latest_names = run_query_df(conn, query_top10_latest_all_types, (latest_fy,))
-                top10_monument_names_list = df_top10_latest_names['monument_name'].tolist() if not df_top10_latest_names.empty else []
+                query_top10_latest_all_types = f"SELECT DISTINCT Monument_Name FROM Top_Monuments WHERE Financial_Year = '{latest_fy}' AND Monument_Name != 'Others';"
+                df_top10_latest_names = run_query_df(conn, query_top10_latest_all_types)
+                top10_monument_names_list = df_top10_latest_names['MONUMENT_NAME'].tolist() if not df_top10_latest_names.empty else []
 
-                query_monuments_growth = """
-                    SELECT circle, monument_name, domestic_visitors_fy_start, foreign_visitors_fy_start, 
-                           domestic_visitors_fy_end, foreign_visitors_fy_end 
-                    FROM tourism_data.all_monuments_stats 
-                    WHERE financial_year_range = %s 
-                      AND monument_name NOT LIKE 'Total%%' AND circle NOT LIKE 'Total%%';
-                """
-                df_monuments_for_growth = run_query_df(conn, query_monuments_growth, (latest_fy,))
+                query_monuments_growth = f"SELECT Circle, Monument_Name, Domestic_Visitors_FY_Start, Foreign_Visitors_FY_Start, Domestic_Visitors_FY_End, Foreign_Visitors_FY_End FROM All_Monuments_Stats WHERE Financial_Year_Range = '{latest_fy}' AND Monument_Name NOT LIKE 'Total%' AND Circle NOT LIKE 'Total%';"
+                df_monuments_for_growth = run_query_df(conn, query_monuments_growth)
 
                 if not df_monuments_for_growth.empty:
-                    num_cols = ['domestic_visitors_fy_start', 'foreign_visitors_fy_start', 'domestic_visitors_fy_end', 'foreign_visitors_fy_end']
+                    num_cols = ['DOMESTIC_VISITORS_FY_START', 'FOREIGN_VISITORS_FY_START', 'DOMESTIC_VISITORS_FY_END', 'FOREIGN_VISITORS_FY_END']
                     for col in num_cols:
                         df_monuments_for_growth[col] = pd.to_numeric(df_monuments_for_growth[col], errors='coerce').fillna(0)
 
-                    df_monuments_for_growth['total_visitors_fy_start'] = df_monuments_for_growth['domestic_visitors_fy_start'] + df_monuments_for_growth['foreign_visitors_fy_start']
-                    df_monuments_for_growth['total_visitors_fy_end'] = df_monuments_for_growth['domestic_visitors_fy_end'] + df_monuments_for_growth['foreign_visitors_fy_end']
+                    df_monuments_for_growth['TOTAL_VISITORS_FY_START'] = df_monuments_for_growth['DOMESTIC_VISITORS_FY_START'] + df_monuments_for_growth['FOREIGN_VISITORS_FY_START']
+                    df_monuments_for_growth['TOTAL_VISITORS_FY_END'] = df_monuments_for_growth['DOMESTIC_VISITORS_FY_END'] + df_monuments_for_growth['FOREIGN_VISITORS_FY_END']
                     
-                    df_monuments_for_growth['total_growth_pct_calculated'] = df_monuments_for_growth.apply(
-                        lambda row: calculate_growth(row['total_visitors_fy_end'], row['total_visitors_fy_start']), axis=1
+                    df_monuments_for_growth['TOTAL_GROWTH_PCT_CALCULATED'] = df_monuments_for_growth.apply(
+                        lambda row: calculate_growth(row['TOTAL_VISITORS_FY_END'], row['TOTAL_VISITORS_FY_START']), axis=1
                     )
-                    
-                    df_monuments_for_growth['total_growth_numeric'] = df_monuments_for_growth['total_growth_pct_calculated'].apply(growth_to_numeric)
+                    def growth_to_numeric_mon(growth_str):
+                        if isinstance(growth_str, str):
+                            if growth_str == "New Growth": return 10000 
+                            if growth_str == "N/A" or growth_str == "0.00%": return 0
+                            try:
+                                return float(growth_str.replace('%',''))
+                            except ValueError:
+                                return 0
+                        return float(growth_str) if pd.notna(growth_str) else 0
+                    df_monuments_for_growth['TOTAL_GROWTH_NUMERIC'] = df_monuments_for_growth['TOTAL_GROWTH_PCT_CALCULATED'].apply(growth_to_numeric_mon)
 
                     df_rising_monuments = df_monuments_for_growth[
-                        ~df_monuments_for_growth['monument_name'].isin(top10_monument_names_list) &
-                        (df_monuments_for_growth['total_growth_numeric'] > 20) 
-                    ].sort_values(by='total_growth_numeric', ascending=False).head(7)
+                        ~df_monuments_for_growth['MONUMENT_NAME'].isin(top10_monument_names_list) &
+                        (df_monuments_for_growth['TOTAL_GROWTH_NUMERIC'] > 20) 
+                    ].sort_values(by='TOTAL_GROWTH_NUMERIC', ascending=False).head(7)
 
                     if not df_rising_monuments.empty:
                         st.write(f"Emerging monument destinations based on total visitor growth ({latest_fy.split('-')[0]} to {latest_fy.split('-')[1]}):")
@@ -285,25 +272,25 @@ elif st.session_state.app_mode == "🏛️ Explore Cultural Destinations":
                         )
 
                         for index, row_mon_star in df_rising_monuments.iterrows():
-                            st.markdown(f"#### {row_mon_star['monument_name']} ({row_mon_star['circle']})")
+                            st.markdown(f"#### {row_mon_star['MONUMENT_NAME']} ({row_mon_star['CIRCLE']})")
                             
-                            delta_val_mon = row_mon_star['total_growth_pct_calculated']
+                            delta_val_mon = row_mon_star['TOTAL_GROWTH_PCT_CALCULATED']
                             delta_display_mon = delta_val_mon if delta_val_mon not in ["N/A", "0.00%"] else None
                                                         
                             st.metric(label=f"Total Visitors ({latest_fy.split('-')[1]})", 
-                                      value=f"{int(row_mon_star['total_visitors_fy_end']):,}", 
+                                      value=f"{int(row_mon_star['TOTAL_VISITORS_FY_END']):,}", 
                                       delta=delta_display_mon)
                             
                             fy_start_label = latest_fy.split('-')[0]
                             fy_end_label = latest_fy.split('-')[1]
 
                             if rising_mon_visitor_type == "Domestic Visitors":
-                                visitors_start = row_mon_star['domestic_visitors_fy_start']
-                                visitors_end = row_mon_star['domestic_visitors_fy_end']
+                                visitors_start = row_mon_star['DOMESTIC_VISITORS_FY_START']
+                                visitors_end = row_mon_star['DOMESTIC_VISITORS_FY_END']
                                 chart_title = "Domestic Visitors"
                             else: 
-                                visitors_start = row_mon_star['foreign_visitors_fy_start']
-                                visitors_end = row_mon_star['foreign_visitors_fy_end']
+                                visitors_start = row_mon_star['FOREIGN_VISITORS_FY_START']
+                                visitors_end = row_mon_star['FOREIGN_VISITORS_FY_END']
                                 chart_title = "Foreign Visitors"
                             
                             chart_data_mon = pd.DataFrame({
@@ -325,14 +312,7 @@ elif st.session_state.app_mode == "🏛️ Explore Cultural Destinations":
     with tab2:
         st.subheader("Iconic Monuments & Detailed Visitor Trends")
         try:
-            query_top10_dom_detail = """
-                SELECT monument_name, number_of_visitors 
-                FROM tourism_data.top_monuments 
-                WHERE financial_year = 'FY2022-23' 
-                  AND visitor_type = 'Domestic' 
-                  AND monument_name != 'Others' 
-                ORDER BY data_rank;
-            """
+            query_top10_dom_detail = "SELECT Monument_Name, Number_of_Visitors FROM Top_Monuments WHERE Financial_Year = 'FY2022-23' AND Visitor_Type = 'Domestic' AND Monument_Name != 'Others' ORDER BY Data_Rank;"
             df_top10_dom_detail = run_query_df(conn, query_top10_dom_detail)
             if not df_top10_dom_detail.empty:
                 df_top10_dom_detail.index = np.arange(1, len(df_top10_dom_detail) + 1)
@@ -346,43 +326,35 @@ elif st.session_state.app_mode == "🏛️ Explore Cultural Destinations":
         st.markdown("---")
         st.subheader("Detailed Monument Visitor Trends (Year-on-Year)")
         try:
-            circles_query = "SELECT DISTINCT circle FROM tourism_data.all_monuments_stats WHERE circle NOT LIKE 'Total%%' AND circle IS NOT NULL ORDER BY circle;"
-            circles_df = run_query_df(conn, circles_query)
+            circles_df = run_query_df(conn, "SELECT DISTINCT Circle FROM All_Monuments_Stats WHERE Circle NOT LIKE 'Total%' AND Circle IS NOT NULL ORDER BY Circle;")
             if not circles_df.empty:
-                selected_circle = st.selectbox("Select ASI Circle:", circles_df['circle'], key="mon_circle_select_detail")
+                selected_circle = st.selectbox("Select ASI Circle:", circles_df['CIRCLE'], key="mon_circle_select_detail")
                 if selected_circle:
-                    monuments_in_circle_query = "SELECT DISTINCT monument_name FROM tourism_data.all_monuments_stats WHERE circle = %s AND monument_name NOT LIKE 'Total%%' ORDER BY monument_name;"
-                    monuments_in_circle_df = run_query_df(conn, monuments_in_circle_query, (selected_circle,))
+                    monuments_in_circle_df = run_query_df(conn, f"SELECT DISTINCT Monument_Name FROM All_Monuments_Stats WHERE Circle = '{selected_circle}' AND Monument_Name NOT LIKE 'Total%' ORDER BY Monument_Name;")
                     if not monuments_in_circle_df.empty:
-                        selected_monument = st.selectbox("Select Monument:", monuments_in_circle_df['monument_name'], key="mon_name_select_detail")
+                        selected_monument = st.selectbox("Select Monument:", monuments_in_circle_df['MONUMENT_NAME'], key="mon_name_select_detail")
                         if selected_monument:
-                            query_monument = """
-                                SELECT financial_year_range, domestic_visitors_fy_start, foreign_visitors_fy_start, 
-                                       domestic_visitors_fy_end, foreign_visitors_fy_end 
-                                FROM tourism_data.all_monuments_stats 
-                                WHERE monument_name = %s AND circle = %s 
-                                ORDER BY financial_year_range;
-                            """
-                            df_monument_detail = run_query_df(conn, query_monument, (selected_monument, selected_circle))
+                            query_monument = f"SELECT Financial_Year_Range, Domestic_Visitors_FY_Start, Foreign_Visitors_FY_Start, Domestic_Visitors_FY_End, Foreign_Visitors_FY_End FROM All_Monuments_Stats WHERE Monument_Name = '{selected_monument}' AND Circle = '{selected_circle}' ORDER BY Financial_Year_Range;"
+                            df_monument_detail = run_query_df(conn, query_monument)
                             if not df_monument_detail.empty:
                                 st.write(f"Visitor Statistics for {selected_monument}:")
                                 for idx, row_detail in df_monument_detail.iterrows():
-                                    st.markdown(f"**Data for: {row_detail['financial_year_range']}**")
-                                    dom_start = pd.to_numeric(row_detail['domestic_visitors_fy_start'], errors='coerce')
-                                    dom_end = pd.to_numeric(row_detail['domestic_visitors_fy_end'], errors='coerce')
-                                    for_start = pd.to_numeric(row_detail['foreign_visitors_fy_start'], errors='coerce')
-                                    for_end = pd.to_numeric(row_detail['foreign_visitors_fy_end'], errors='coerce')
+                                    st.markdown(f"**Data for: {row_detail['FINANCIAL_YEAR_RANGE']}**")
+                                    dom_start = pd.to_numeric(row_detail['DOMESTIC_VISITORS_FY_START'], errors='coerce')
+                                    dom_end = pd.to_numeric(row_detail['DOMESTIC_VISITORS_FY_END'], errors='coerce')
+                                    for_start = pd.to_numeric(row_detail['FOREIGN_VISITORS_FY_START'], errors='coerce')
+                                    for_end = pd.to_numeric(row_detail['FOREIGN_VISITORS_FY_END'], errors='coerce')
 
                                     domestic_growth_calculated = calculate_growth(dom_end, dom_start)
                                     foreign_growth_calculated = calculate_growth(for_end, for_start)
                                     
                                     col1_mon, col2_mon = st.columns(2)
                                     with col1_mon:
-                                        st.metric(f"Domestic Visitors ({row_detail['financial_year_range'].split('-')[0]})", f"{int(dom_start):,}" if pd.notna(dom_start) else "N/A")
-                                        st.metric(f"Domestic Visitors ({row_detail['financial_year_range'].split('-')[1]})", f"{int(dom_end):,}" if pd.notna(dom_end) else "N/A", delta=domestic_growth_calculated if domestic_growth_calculated not in ["0.00%", "N/A"] else None)
+                                        st.metric(f"Domestic Visitors ({row_detail['FINANCIAL_YEAR_RANGE'].split('-')[0]})", f"{int(dom_start):,}" if pd.notna(dom_start) else "N/A")
+                                        st.metric(f"Domestic Visitors ({row_detail['FINANCIAL_YEAR_RANGE'].split('-')[1]})", f"{int(dom_end):,}" if pd.notna(dom_end) else "N/A", delta=domestic_growth_calculated if domestic_growth_calculated not in ["0.00%", "N/A"] else None)
                                     with col2_mon:
-                                        st.metric(f"Foreign Visitors ({row_detail['financial_year_range'].split('-')[0]})", f"{int(for_start):,}" if pd.notna(for_start) else "N/A")
-                                        st.metric(f"Foreign Visitors ({row_detail['financial_year_range'].split('-')[1]})", f"{int(for_end):,}" if pd.notna(for_end) else "N/A", delta=foreign_growth_calculated if foreign_growth_calculated not in ["0.00%", "N/A"] else None)
+                                        st.metric(f"Foreign Visitors ({row_detail['FINANCIAL_YEAR_RANGE'].split('-')[0]})", f"{int(for_start):,}" if pd.notna(for_start) else "N/A")
+                                        st.metric(f"Foreign Visitors ({row_detail['FINANCIAL_YEAR_RANGE'].split('-')[1]})", f"{int(for_end):,}" if pd.notna(for_end) else "N/A", delta=foreign_growth_calculated if foreign_growth_calculated not in ["0.00%", "N/A"] else None)
                                     st.caption("Growth calculated based on start and end year figures. 'New Growth' indicates start year was zero.")
                                     st.markdown("---")
                             else:
@@ -408,12 +380,8 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
         st.subheader("Overall Scheme-wise Funds Released (National Level)")
         st.markdown("Funding trends for major cultural schemes over the years (Amounts in Crores).")
         try:
-            query = """
-                SELECT scheme_name, funds_2019_20, funds_2020_21, funds_2021_22, funds_2022_23, funds_2023_24 
-                FROM tourism_data.schemewisefundsreleased 
-                WHERE scheme_name NOT LIKE 'Total%%' AND scheme_name NOT LIKE 'Grand Total';
-            """
-            df_overall_funds = run_query_df(conn, query)
+
+            df_overall_funds = run_query_df(conn, "SELECT Scheme_Name, Funds_2019_20, Funds_2020_21, Funds_2021_22, Funds_2022_23, Funds_2023_24 FROM SchemeWiseFundsReleased WHERE Scheme_Name NOT LIKE 'Total%' AND Scheme_Name NOT LIKE 'Grand Total';")
             if not df_overall_funds.empty:
 
                 df_overall_funds.columns = ["Scheme Name", "2019-20", "2020-21", "2021-22", "2022-23", "2023-24"]
@@ -443,21 +411,16 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
         st.subheader("Artist Support Schemes Overview")
         st.markdown("Descriptive overview of various schemes aimed at supporting artists and cultural practices.")
         try:
-            query = """
-                SELECT schemeid, schemename, administeringbody, focusarea, 
-                       datapoint_example_state_ut, datapoint_example_value, relevancetoplatform 
-                FROM tourism_data.artistsupportschemesummary;
-            """
-            df_summary = run_query_df(conn, query)
+            df_summary = run_query_df(conn, "SELECT SchemeID, SchemeName, AdministeringBody, FocusArea, DataPoint_Example_State_UT, DataPoint_Example_Value, RelevanceToPlatform FROM ArtistSupportSchemeSummary;")
             if not df_summary.empty:
                 for index, row in df_summary.iterrows():
-                    st.markdown(f"#### {row['schemename']}")
+                    st.markdown(f"#### {row['SCHEMENAME']}")
                     with st.expander("Details", expanded=False):
-                        st.markdown(f"**Administering Body:** {row['administeringbody']}")
-                        st.markdown(f"**Focus Area:** {row['focusarea']}")
-                        if pd.notna(row['datapoint_example_state_ut']) and pd.notna(row['datapoint_example_value']):
-                            st.markdown(f"**Impact:** {row['datapoint_example_value']} in {row['datapoint_example_state_ut']}")
-                        st.write(f"**Relevance to Platform:** {row['relevancetoplatform']}")
+                        st.markdown(f"**Administering Body:** {row['ADMINISTERINGBODY']}")
+                        st.markdown(f"**Focus Area:** {row['FOCUSAREA']}")
+                        if pd.notna(row['DATAPOINT_EXAMPLE_STATE_UT']) and pd.notna(row['DATAPOINT_EXAMPLE_VALUE']):
+                            st.markdown(f"**Impact:** {row['DATAPOINT_EXAMPLE_VALUE']} in {row['DATAPOINT_EXAMPLE_STATE_UT']}")
+                        st.write(f"**Relevance to Platform:** {row['RELEVANCETOPLATFORM']}")
                     st.markdown("---")
             else: 
                 st.write("No data for Artist Support Schemes Overview.")
@@ -466,38 +429,34 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
 
     with tab_explore_grants:
         st.subheader("Explore Specific Scheme Grants & Data")
-        # Lowercase table names for PostgreSQL
         specific_scheme_table_map = {
-            "Senior/Young Artist Scheme (Beneficiaries)": "senioryoungartistscheme",
-            "Building Grants (Studio Theatre)": "buildinggrantsstudiotheatre",
-            "Veteran Artists (Applications Received)": "veteranartistsapplications",
-            "Guru-Shishya Parampara (Assistance)": "gurushishyaparamparaassistance",
-            "Cultural Function & Production Grants": "culturalfunctionproductiongrant",
-            "Museum Development Grants": "museumgrantschemefunds",
-            "ASI Monument Preservation Expenditure (National)": "asimonumentpreservationexpenditure"
+            "Senior/Young Artist Scheme (Beneficiaries)": "SeniorYoungArtistScheme",
+            "Building Grants (Studio Theatre)": "BuildingGrantsStudioTheatre",
+            "Veteran Artists (Applications Received)": "VeteranArtistsApplications",
+            "Guru-Shishya Parampara (Assistance)": "GuruShishyaParamparaAssistance",
+            "Cultural Function & Production Grants": "CulturalFunctionProductionGrant",
+            "Museum Development Grants": "MuseumGrantSchemeFunds",
+            "ASI Monument Preservation Expenditure (National)": "ASIMonumentPreservationExpenditure"
         }
         selected_specific_scheme_display = st.selectbox("Select Specific Scheme/Grant Data:", list(specific_scheme_table_map.keys()), key="specific_scheme_select_tab3")
         selected_specific_table = specific_scheme_table_map[selected_specific_scheme_display]
 
         try:
-            full_table_name = f"tourism_data.{selected_specific_table}"
-
-            if selected_specific_table == "senioryoungartistscheme":
+            if selected_specific_table == "SeniorYoungArtistScheme":
                 st.markdown("##### Senior/Young Artist Scheme Beneficiary Data")
-                query = f"SELECT new_states as state, subject, gender, age, phy_handicaped, sc_st, user_id, field_id FROM {full_table_name} ORDER BY state, age;"
-                df_syas = run_query_df(conn, query)
+                df_syas = run_query_df(conn, f"SELECT NEW_STATES as State, SUBJECT, GENDER, AGE, PHY_HANDICAPED, SC_ST, USER_ID, FIELD_ID FROM {selected_specific_table} ORDER BY State, AGE;")
                 
                 if not df_syas.empty:
-                    df_syas['subject_clean'] = df_syas['subject'].str.strip().str.title()
+                    df_syas['SUBJECT_CLEAN'] = df_syas['SUBJECT'].str.strip().str.title()
 
-                    unique_states_syas = sorted([s for s in df_syas['state'].unique() if pd.notna(s)])
+                    unique_states_syas = sorted([s for s in df_syas['STATE'].unique() if pd.notna(s)])
                     selected_state_syas_tab3 = st.selectbox("Filter by State:", ["All"] + unique_states_syas, key="syas_state_filter_tab3")
                     
                     df_filtered_syas = df_syas.copy()
                     if selected_state_syas_tab3 != "All":
-                        df_filtered_syas = df_filtered_syas[df_filtered_syas['state'] == selected_state_syas_tab3]
+                        df_filtered_syas = df_filtered_syas[df_filtered_syas['STATE'] == selected_state_syas_tab3]
 
-                    display_cols_syas = ['state', 'subject', 'gender', 'age', 'phy_handicaped']
+                    display_cols_syas = ['STATE', 'SUBJECT', 'GENDER', 'AGE', 'PHY_HANDICAPED']
                     df_display_table_syas = df_filtered_syas[display_cols_syas].copy()
                     df_display_table_syas.index = np.arange(1, len(df_display_table_syas) + 1)
                     st.dataframe(df_display_table_syas.head(50))
@@ -506,16 +465,15 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                         st.markdown("###### Summary Charts")
                         
                         st.markdown("Distribution of Beneficiaries by State (Selected Filter):")
-                        beneficiaries_by_state_filtered = df_filtered_syas.groupby('state').size().reset_index(name='Number of Beneficiaries').sort_values(by='Number of Beneficiaries', ascending=False)
-                        st.bar_chart(beneficiaries_by_state_filtered.head(15).set_index('state'))
+                        beneficiaries_by_state_filtered = df_filtered_syas.groupby('STATE').size().reset_index(name='Number of Beneficiaries').sort_values(by='Number of Beneficiaries', ascending=False)
+                        st.bar_chart(beneficiaries_by_state_filtered.head(15).set_index('STATE'))
 
                 else: 
                     st.write(f"No data available for {selected_specific_scheme_display}.")
             
-            elif selected_specific_table == "buildinggrantsstudiotheatre":
+            elif selected_specific_table == "BuildingGrantsStudioTheatre":
                 st.markdown("##### Building Grants including Studio Theatre (Amount in Lakhs)")
-                query = f"SELECT state_ut, amount_21_22, amount_22_23, amount_released_authorized_23_24 FROM {full_table_name} WHERE state_ut NOT LIKE 'Total%%';"
-                df_data = run_query_df(conn, query)
+                df_data = run_query_df(conn, f"SELECT State_UT, Amount_21_22, Amount_22_23, Amount_Released_Authorized_23_24 FROM {selected_specific_table} WHERE State_UT NOT LIKE 'Total%';")
                 if not df_data.empty:
                     df_data.columns = ["State/UT", "Amount 21-22", "Amount 22-23", "Amount 23-24"]
                     for col in ["Amount 21-22", "Amount 22-23", "Amount 23-24"]:
@@ -527,10 +485,9 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                     st.dataframe(df_data)
                 else: st.write(f"No data available for {selected_specific_scheme_display}.")
 
-            elif selected_specific_table == "veteranartistsapplications":
+            elif selected_specific_table == "VeteranArtistsApplications":
                 st.markdown("##### Applications for Veteran Artists Financial Assistance")
-                query = f"SELECT state_ut, apps_2019_20, apps_2020_21, apps_2021_22, apps_2022_23, apps_2023_24 FROM {full_table_name} WHERE state_ut NOT LIKE 'Total%%';"
-                df_data = run_query_df(conn, query)
+                df_data = run_query_df(conn, f"SELECT State_UT, Apps_2019_20, Apps_2020_21, Apps_2021_22, Apps_2022_23, Apps_2023_24 FROM {selected_specific_table} WHERE State_UT NOT LIKE 'Total%';")
                 if not df_data.empty:
                     df_data.columns = ["State/UT", "Apps 19-20", "Apps 20-21", "Apps 21-22", "Apps 22-23", "Apps 23-24"]
                     latest_year_col_vaa = "Apps 23-24" 
@@ -540,10 +497,9 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                     st.dataframe(df_data)
                 else: st.write(f"No data for {selected_specific_scheme_display}.")
             
-            elif selected_specific_table == "gurushishyaparamparaassistance":
+            elif selected_specific_table == "GuruShishyaParamparaAssistance":
                 st.markdown("##### Guru-Shishya Parampara Assistance (Amount in Lakhs)")
-                query = f"SELECT state_ut, amount_21_22, amount_22_23, amount_released_authorized_23_24 FROM {full_table_name} WHERE state_ut NOT LIKE 'Total%%' AND state_ut IS NOT NULL;"
-                df_data = run_query_df(conn, query)
+                df_data = run_query_df(conn, f"SELECT State_UT, Amount_21_22, Amount_22_23, Amount_Released_Authorized_23_24 FROM {selected_specific_table} WHERE State_UT NOT LIKE 'Total%' AND State_UT IS NOT NULL;")
                 if not df_data.empty:
                     df_data.columns = ["State/UT", "Amount 21-22", "Amount 22-23", "Amount 23-24 (Released/Authorized)"]
                     amount_cols = ["Amount 21-22", "Amount 22-23", "Amount 23-24 (Released/Authorized)"]
@@ -563,10 +519,9 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                     st.dataframe(df_data)
                 else: st.write(f"No data available for {selected_specific_scheme_display}.")
 
-            elif selected_specific_table == "culturalfunctionproductiongrant":
+            elif selected_specific_table == "CulturalFunctionProductionGrant":
                 st.markdown("##### Cultural Function & Production Grants (Amount in Lakhs)")
-                query = f"SELECT state_ut, amount_21_22, amount_22_23, amount_released_23_24 FROM {full_table_name} WHERE state_ut NOT LIKE 'Total%%' AND state_ut IS NOT NULL;" 
-                df_data = run_query_df(conn, query)
+                df_data = run_query_df(conn, f"SELECT State_UT, Amount_21_22, Amount_22_23, Amount_Released_23_24 FROM {selected_specific_table} WHERE State_UT NOT LIKE 'Total%' AND State_UT IS NOT NULL;") 
                 if not df_data.empty:
                     df_data.columns = ["State/UT", "Amount 21-22", "Amount 22-23", "Amount 23-24 (Released)"]
                     amount_cols_cfp = ["Amount 21-22", "Amount 22-23", "Amount 23-24 (Released)"]
@@ -586,37 +541,34 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                     st.dataframe(df_data)
                 else: st.write(f"No data available for {selected_specific_scheme_display}.")
 
-            elif selected_specific_table == "museumgrantschemefunds":
+            elif selected_specific_table == "MuseumGrantSchemeFunds":
                 st.markdown("##### Museum Development Grants (Funds Released)")
-                query = f"SELECT state_name, organization_name, type_of_museum, funds_2019_20, funds_2020_21, funds_2021_22, funds_2022_23, funds_2023_24 FROM {full_table_name} WHERE state_name NOT LIKE 'Total%%' AND state_name IS NOT NULL;"
-                df_data = run_query_df(conn, query)
+                df_data = run_query_df(conn, f"SELECT State_Name, Organization_Name, Type_of_Museum, Funds_2019_20, Funds_2020_21, Funds_2021_22, Funds_2022_23, Funds_2023_24 FROM {selected_specific_table} WHERE State_Name NOT LIKE 'Total%' AND State_Name IS NOT NULL;")
                 if not df_data.empty:
-                    fund_cols_db = ['funds_2019_20', 'funds_2020_21', 'funds_2021_22', 'funds_2022_23', 'funds_2023_24']
-                    fund_cols_display = ['2019-20', '2020-21', '2021-22', '2022-23', '2023-24']
-                    fund_cols_map = dict(zip(fund_cols_db, fund_cols_display))
+                    fund_cols_map = {'FUNDS_2019_20': '2019-20', 'FUNDS_2020_21': '2020-21', 'FUNDS_2021_22': '2021-22', 'FUNDS_2022_23': '2022-23', 'FUNDS_2023_24': '2023-24'}
+                    for col_db_original_case in fund_cols_map.keys():
+                        df_data[col_db_original_case] = pd.to_numeric(df_data[col_db_original_case].replace('NA', np.nan), errors='coerce').fillna(0)
 
-                    for col_db in fund_cols_db:
-                        df_data[col_db] = pd.to_numeric(df_data[col_db], errors='coerce').fillna(0)
-
-                    unique_states_museum = sorted([s for s in df_data['state_name'].unique() if pd.notna(s)])
+                    unique_states_museum = sorted([s for s in df_data['STATE_NAME'].unique() if pd.notna(s)])
                     selected_states_museum = st.multiselect("Select State(s):", unique_states_museum, default=unique_states_museum[:min(3, len(unique_states_museum))], key="museum_state_multiselect_revised")
                     
-                    selected_year_museum_display = st.selectbox("Select Year to View Funds:", fund_cols_display, key="museum_year_select_revised")
+                    available_years_museum = list(fund_cols_map.values())
+                    selected_year_museum_display = st.selectbox("Select Year to View Funds:", available_years_museum, key="museum_year_select_revised")
 
-                    selected_year_db_col = [k for k, v in fund_cols_map.items() if v == selected_year_museum_display][0]
+                    selected_year_db_col_actual_case = [k for k, v in fund_cols_map.items() if v == selected_year_museum_display][0]
+
 
                     if selected_states_museum and selected_year_museum_display:
-                        df_filtered_museum = df_data[df_data['state_name'].isin(selected_states_museum)]
-                        st.bar_chart(df_filtered_museum.groupby('state_name')[selected_year_db_col].sum())
+                        df_filtered_museum = df_data[df_data['STATE_NAME'].isin(selected_states_museum)]
+                        st.bar_chart(df_filtered_museum.groupby('STATE_NAME')[selected_year_db_col_actual_case].sum())
                     
                     df_data.index = np.arange(1, len(df_data) + 1)
                     st.dataframe(df_data)
                 else: st.write(f"No data available for {selected_specific_scheme_display}.")
             
-            elif selected_specific_table == "asimonumentpreservationexpenditure":
+            elif selected_specific_table == "ASIMonumentPreservationExpenditure":
                 st.markdown("##### ASI Monument Preservation Expenditure (National Level, Amount in Crores)")
-                query = f"SELECT year, allocation, expenditure FROM {full_table_name};"
-                df_asi_exp = run_query_df(conn, query)
+                df_asi_exp = run_query_df(conn, f"SELECT Year, Allocation, Expenditure FROM {selected_specific_table};")
                 if not df_asi_exp.empty:
                     df_asi_exp.columns = ["Financial Year", "Allocation (Crores)", "Expenditure (Crores)"]
                     st.line_chart(df_asi_exp.set_index("Financial Year"))
@@ -624,27 +576,18 @@ elif st.session_state.app_mode == "💰 Government Support & Schemes":
                     st.dataframe(df_asi_exp)
                 else: st.write(f"No data for {selected_specific_scheme_display}.")
             
-            else: # Fallback for any other table
+            else: 
                 st.markdown(f"##### Data for: {selected_specific_scheme_display}")
                 try:
-                    # Generic, safe query
-                    query = f"SELECT * FROM {full_table_name} LIMIT 200;"
-                    df_generic_scheme = run_query_df(conn, query)
-                    
-                    if not df_generic_scheme.empty:
-                        # Post-filter in pandas if columns exist
-                        if 'state_ut' in df_generic_scheme.columns:
-                            df_generic_scheme = df_generic_scheme[~df_generic_scheme['state_ut'].astype(str).str.contains('Total', na=False, case=False)]
-                        elif 'scheme_name' in df_generic_scheme.columns:
-                             df_generic_scheme = df_generic_scheme[~df_generic_scheme['scheme_name'].astype(str).str.contains('Total', na=False, case=False)]
-
-                        df_generic_scheme.index = np.arange(1, len(df_generic_scheme) + 1)
-                        st.dataframe(df_generic_scheme)
-                    else:
-                        st.write(f"No data available for: {selected_specific_scheme_display}.")
-                except Exception as e:
-                    st.error(f"An error occurred while fetching generic data for {selected_specific_scheme_display}: {e}")
-
+                    df_generic_scheme = run_query_df(conn, f"SELECT * FROM {selected_specific_table} WHERE (COLUMN_EXISTS('State_UT') AND State_UT NOT LIKE 'Total%') OR (COLUMN_EXISTS('Scheme_Name') AND Scheme_Name NOT LIKE 'Total%') OR (NOT COLUMN_EXISTS('State_UT') AND NOT COLUMN_EXISTS('Scheme_Name')) LIMIT 100;")
+                except: 
+                     df_generic_scheme = run_query_df(conn, f"SELECT * FROM {selected_specific_table} LIMIT 100;")
+                
+                if not df_generic_scheme.empty:
+                    df_generic_scheme.index = np.arange(1, len(df_generic_scheme) + 1)
+                    st.dataframe(df_generic_scheme)
+                else:
+                    st.write(f"No data available or table structure not fully anticipated for: {selected_specific_scheme_display}.")
         except Exception as e:
             st.error(f"An error occurred while fetching data for {selected_specific_scheme_display}: {e}")
 
@@ -655,38 +598,38 @@ elif st.session_state.app_mode == "📅 Plan Your Visit (Seasonality)":
     
     st.subheader("Foreign Tourist Arrivals (FTAs) Seasonality")
     try:
-        # Using a window function to get the latest data for each month/year combo
         query_seasonality_fta = """
         WITH RankedFTAs AS (
             SELECT
-                month_name,
-                data_year,
-                fta_count,
-                ROW_NUMBER() OVER (PARTITION BY month_name, data_year ORDER BY report_source_year DESC) as rn
-            FROM tourism_data.ftamonthly 
+                Month_Name,
+                Data_Year,
+                FTA_Count,
+                ROW_NUMBER() OVER (PARTITION BY Month_Name, Data_Year ORDER BY Report_Source_Year DESC) as rn
+            FROM FTAMonthly 
         )
-        SELECT month_name, data_year, fta_count
+        SELECT Month_Name, Data_Year, FTA_Count
         FROM RankedFTAs
         WHERE rn = 1; 
         """ 
+        
         df_season_fta = run_query_df(conn, query_seasonality_fta)
 
         if not df_season_fta.empty:
             month_order = ["January", "February", "March", "April", "May", "June", 
                            "July", "August", "September", "October", "November", "December"]
             
-            df_season_fta['month_name'] = pd.Categorical(df_season_fta['month_name'], categories=month_order, ordered=True)
-            df_season_fta = df_season_fta.sort_values(by=['data_year', 'month_name'])
+            df_season_fta['MONTH_NAME'] = pd.Categorical(df_season_fta['MONTH_NAME'], categories=month_order, ordered=True)
+            df_season_fta = df_season_fta.sort_values(by=['DATA_YEAR', 'MONTH_NAME'])
 
-            available_years_fta = sorted(df_season_fta['data_year'].unique(), reverse=True)
+            available_years_fta = sorted(df_season_fta['DATA_YEAR'].unique(), reverse=True)
             if available_years_fta:
                 selected_year_fta = st.selectbox("Select Year to View FTA Seasonality:", available_years_fta, key="fta_year_select")
                 
-                df_year_season_fta = df_season_fta[df_season_fta['data_year'] == selected_year_fta]
+                df_year_season_fta = df_season_fta[df_season_fta['DATA_YEAR'] == selected_year_fta]
 
                 if not df_year_season_fta.empty:
                     st.write(f"Foreign Tourist Arrivals in {selected_year_fta}")
-                    st.line_chart(df_year_season_fta.set_index('month_name')['fta_count'])
+                    st.line_chart(df_year_season_fta.set_index('MONTH_NAME')['FTA_COUNT'])
                     st.caption("Data reflects overall foreign tourist arrivals and can indicate peak and lean seasons for international visitors.")
                 else:
                     st.write(f"No FTA data for {selected_year_fta}.")
@@ -702,28 +645,23 @@ elif st.session_state.app_mode == "💎 Untouched Cultural Gems":
     st.title("💎 Discover Untouched Cultural Gems")
     st.markdown("Explore some of India's lesser-known destinations that offer rich cultural experiences, and learn how to visit them responsibly.")
     try:
-        query = """
-            SELECT gemname, state, region, type, culturalsignificance, 
-                   whypotentiallyuntouched, responsibletravelguideline, imageurl 
-            FROM tourism_data.untouchedgems;
-        """
-        df_gems = run_query_df(conn, query) 
+        df_gems = run_query_df(conn, "SELECT GemName, State, Region, Type, CulturalSignificance, WhyPotentiallyUntouched, ResponsibleTravelGuideline, ImageURL FROM UntouchedGems;") 
         
         if not df_gems.empty:
             for index, row in df_gems.iterrows():
-                st.subheader(row['gemname'])
-                if pd.notna(row['imageurl']) and row['imageurl'].strip():
+                st.subheader(row['GEMNAME'])
+                if pd.notna(row['IMAGEURL']) and row['IMAGEURL'].strip():
                     try:
-                        st.image(row['imageurl'], caption=row['gemname'], width=400) 
+                        st.image(row['IMAGEURL'], caption=row['GEMNAME'], width=400) 
                     except Exception as img_e:
-                        st.caption(f"Could not load image for {row['gemname']}.")
+                        st.caption(f"Could not load image for {row['GEMNAME']}.")
                 else:
-                    st.caption(f"Image not available for {row['gemname']}.")
+                    st.caption(f"Image not available for {row['GEMNAME']}.")
 
-                st.markdown(f"**State:** {row['state']} | **Region:** {row['region']} | **Type:** {row['type']}")
-                st.write(f"**Cultural Significance:** {row['culturalsignificance']}")
-                st.info(f"**Why Potentially Untouched?** {row['whypotentiallyuntouched']}")
-                st.success(f"🌿 **Responsible Travel Guideline:** {row['responsibletravelguideline']}")
+                st.markdown(f"**State:** {row['STATE']} | **Region:** {row['REGION']} | **Type:** {row['TYPE']}")
+                st.write(f"**Cultural Significance:** {row['CULTURALSIGNIFICANCE']}")
+                st.info(f"**Why Potentially Untouched?** {row['WHYPOTENTIALLYUNTOUCHED']}")
+                st.success(f"🌿 **Responsible Travel Guideline:** {row['RESPONSIBLETRAVELGUIDELINE']}")
                 st.markdown("---")
         else:
             st.write("No untouched gems data available.")
@@ -746,3 +684,4 @@ elif st.session_state.app_mode == "🌿 Responsible Tourism":
     * **Stay Informed:** Research your destination, understand local sensitivities, and be aware of any specific guidelines for visitors.
     * **Provide Constructive Feedback:** If you encounter practices that are not responsible, provide polite feedback to the concerned authorities or businesses.
     """)
+
