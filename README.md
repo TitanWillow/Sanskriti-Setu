@@ -102,4 +102,4 @@ Snowflake serves as the central data warehouse for संस्कृति स�
     ```bash
     streamlit run app.py
     ```
-
+Note: snowflake-app.py holds the code for snowflake database while app.py holds for neon postgresql database. This project was done for a hackathon, the aim was to create a dashboard app on the given topic.
